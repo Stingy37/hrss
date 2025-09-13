@@ -27,8 +27,7 @@ viz = ["matplotlib"]
 notebooks = ["jupyter", "ipykernel"]
 
 [project.urls]
-Homepage = "https://github.com/<your-username>/hrss"
-Repository = "https://github.com/<your-username>/hrss"
+Repository = "https://github.com/Stingy37/hrss"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/hrss"]
