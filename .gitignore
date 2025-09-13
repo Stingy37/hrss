@@ -1,0 +1,30 @@
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+*.egg
+.pytest_cache/
+.ipynb_checkpoints/
+
+# environments
+.venv/
+env/
+venv/
+
+# OS/editor
+.DS_Store
+.vscode/
+
+# data/artifacts (keep data off GitHub; use Zenodo)
+Datasets/
+*.h5
+*.hdf5
+*.zip
+*.tar.gz
+*.sha256
+
+# notebooks metadata noise
+**/.ipynb_checkpoints
