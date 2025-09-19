@@ -28,3 +28,6 @@ Datasets/
 
 # notebooks metadata noise
 **/.ipynb_checkpoints
+
+# test configs 
+tests/test_configs.json

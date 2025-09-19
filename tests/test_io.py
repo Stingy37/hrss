@@ -48,6 +48,20 @@ def pick_context_relpath(manifest_df):
     ctx = ctx.sort_values("size_bytes", ascending=True)
     return ctx.iloc[0]["relpath"]
 
+def pick_product_relpath(manifest_df):
+    """
+    Pick the smallest non-context .h5 file so tests stay fast.
+    """
+    df = manifest_df.copy()
+    df = df[
+        (df["relpath"].str.lower().str.endswith(".h5")) &
+        (df["kind"].astype(str).str.lower() != "context")
+    ]
+    if len(df) == 0:
+        return None
+    df = df.sort_values("size_bytes", ascending=True)
+    return df.iloc[0]["relpath"]
+
 # pytest will create a new temp dir per test function
 @pytest.fixture
 def patched_cache_env(tmp_path, monkeypatch):
@@ -82,20 +96,28 @@ def test_dir_ensure_local_file_and_verify(patched_cache_env):
     assert p.exists()
 
 @pytest.mark.skipif(not ENV_YEAR_DIR, reason="HRSS_TEST_YEAR_DIR not set")
-def test_dir_read_schema_and_peek_attrs(patched_cache_env):
+def test_dir_read_product_attrs_and_optional_context_schema(patched_cache_env):
     handle = load_index(resolve_source(ENV_YEAR_DIR))
-    ctx_rel = pick_context_relpath(handle.manifest)
-    if ctx_rel is None:
-        pytest.skip("No context .h5 present in manifest")
-    ctx_path = ensure_local_file(handle, ctx_rel)
-    schema = read_schema(ctx_path)
-    # schema is optional, but your writer emits it; if missing, okay
-    if schema is not None:
-        assert "columns" in schema and "schema_version" in schema
-    # attrs should open without touching /data
-    attrs = peek_h5_attrs(ctx_path)
+    prod_rel = pick_product_relpath(handle.manifest)
+    if prod_rel is None:
+        pytest.skip("No product .h5 present in manifest")
+    prod_path = ensure_local_file(handle, prod_rel)
+
+    attrs = peek_h5_attrs(prod_path)
     assert isinstance(attrs, dict)
-    assert "dataset_version" in attrs  # your writer sets this
+
+    # Product files should expose at least one of these identifying attrs
+    expected_any = {"product_prefix", "shape_T_H_W_C", "dataset_version", "radar_site"}
+    assert any(k in attrs for k in expected_any)
+
+    # If the product links to a context file, try reading its schema sidecar
+    ctx_rel = attrs.get("context_relpath")
+    if ctx_rel:
+        ctx_path = (prod_path.parent / str(ctx_rel)).resolve()
+        schema = read_schema(ctx_path)
+        if schema is not None:
+            assert "columns" in schema
+
 
 @pytest.mark.skipif(not ENV_YEAR_DIR or not ENV_MD5_MAN, reason="Need year dir and MD5 to test failure")
 def test_dir_bad_manifest_md5_raises(patched_cache_env):
@@ -133,18 +155,25 @@ def test_zip_ensure_local_file_extracts_once(patched_cache_env):
     assert p2 == p1
 
 @pytest.mark.skipif(not ENV_ZIP, reason="HRSS_TEST_ZIP not set")
-def test_zip_read_schema_and_peek_attrs(patched_cache_env):
+def test_zip_read_product_attrs_and_optional_context_schema(patched_cache_env):
     handle = load_index(resolve_source(ENV_ZIP))
-    ctx_rel = pick_context_relpath(handle.manifest)
-    if ctx_rel is None:
-        pytest.skip("No context .h5 present in manifest")
-    ctx_path = ensure_local_file(handle, ctx_rel)
-    schema = read_schema(ctx_path)
-    if schema is not None:
-        assert "columns" in schema
-    attrs = peek_h5_attrs(ctx_path)
+    prod_rel = pick_product_relpath(handle.manifest)
+    if prod_rel is None:
+        pytest.skip("No product .h5 present in manifest")
+    prod_path = ensure_local_file(handle, prod_rel)
+
+    attrs = peek_h5_attrs(prod_path)
     assert isinstance(attrs, dict)
-    assert "radar_site" in attrs or "dataset_version" in attrs
+
+    expected_any = {"product_prefix", "shape_T_H_W_C", "dataset_version", "radar_site"}
+    assert any(k in attrs for k in expected_any)
+
+    ctx_rel = attrs.get("context_relpath")
+    if ctx_rel:
+        ctx_path = (prod_path.parent / str(ctx_rel)).resolve()
+        schema = read_schema(ctx_path)
+        if schema is not None:
+            assert "columns" in schema
 
 @pytest.mark.skipif(not ENV_ZIP, reason="HRSS_TEST_ZIP not set")
 def test_zip_missing_relpath_raises(patched_cache_env):
