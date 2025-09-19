@@ -6,10 +6,8 @@ build-backend = "hatchling.build"
 name = "hrss"
 version = "1.0.0"
 description = "High-Res Severe Storm (HRSS) dataset helpers"
-readme = "README.md"
 requires-python = ">=3.9"
-license = { file = "LICENSE" }
-authors = [{ name = "Your Name" }]
+authors = [{ name = "Andy Shi" }]
 classifiers = [
   "Programming Language :: Python :: 3",
   "License :: OSI Approved :: MIT License",
@@ -20,14 +18,21 @@ dependencies = [
   "pandas>=2.0",
   "h5py>=3.8",
   "matplotlib>=3.7",
+  "requests>=2.31; python_version >= '3.9'",
 ]
 
 [project.optional-dependencies]
-viz = ["matplotlib"]
 notebooks = ["jupyter", "ipykernel"]
+dev = [
+  "pytest>=7.0",
+  "pytest-cov>=4.0",
+  "ruff>=0.5",
+  "mypy>=1.8",
+]
 
 [project.urls]
 Repository = "https://github.com/Stingy37/hrss"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/hrss"]
+# Flat layout (no 'src' dir)
+packages = ["hrss"]
