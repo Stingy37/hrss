@@ -36,3 +36,10 @@ Repository = "https://github.com/Stingy37/hrss"
 [tool.hatch.build.targets.wheel]
 # Flat layout (no 'src' dir)
 packages = ["hrss"]
+
+[tool.pytest.ini_options]
+log_cli = true
+log_cli_level = "DEBUG"
+log_cli_format = "%(asctime)s %(levelname)s %(name)s:%(lineno)d - %(message)s"
+log_cli_date_format = "%H:%M:%S"
+addopts = "-s"

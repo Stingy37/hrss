@@ -14,6 +14,8 @@ import tempfile
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Tuple, Union
 from urllib.parse import urlparse
+from datetime import date, datetime
+from urllib.parse import urlparse, parse_qs, urlencode, urlunparse
 
 try:
     import zipfile
@@ -133,35 +135,32 @@ def resolve_source(
     zenodo_host: str = "zenodo.org",
     sandbox_host: str = "sandbox.zenodo.org",
     token: Optional[str] = None,
-) -> SourceHandle:
+    # NEW optional selectors:
+    years: Optional[Iterable[int]] = None,
+    date_from: Optional[str] = None,
+    date_to: Optional[str] = None,
+    allow_multi: bool = False,
+) -> Union["SourceHandle", List["SourceHandle"]]:
     """
-    Normalize a user-provided source into a SourceHandle.
+    Normalize a user-provided source into SourceHandle(s).
 
-    Parameters
-    ----------
+    Inputs
+    ------
     source
-        - Path to a local *year directory* (contains manifest.csv/catalog.csv under it), OR
-        - Path to a local .zip (your Zenodo bundle), OR
-        - A Zenodo DOI like "10.5281/zenodo.1234567" (prod) or "10.5072/zenodo.1234567" (sandbox), OR
-        - A Zenodo record URL like "https://zenodo.org/records/1234567".
-    cache_dir
-        Where to extract files from zip/doi; defaults to ~/.cache/hrss/<archive_key>/.
-    expected_*_md5
-        Optional MD5s for the archive (zip) and the manifest/catalog CSVs. If provided,
-        they'll be checked and raise HRSSIntegrityError on mismatch.
-    zenodo_host, sandbox_host
-        Hosts for public and sandbox Zenodo. Used to form API endpoints when `source` is a DOI/URL.
-    token
-        Optional Zenodo access token for private/embargoed records (as dataset creator).
+        - Local year directory (contains manifest.csv/catalog.csv), OR
+        - Local .zip (your Zenodo bundle), OR
+        - Zenodo DOI ("10.5281/zenodo.<id>" / "10.5072/zenodo.<id>") or record URL ("https://.../records/<id>").
+
+    Optional selection (Zenodo only)
+    --------------------------------
+    years: one or more explicit years to select year-zips by filename.
+    date_from/date_to: infer years covered by the range (inclusive).
+    allow_multi: if True and multiple years match, return a list of handles (one per year).
+                 If False (default) and multiple years match, raise HRSSIOError.
 
     Returns
     -------
-    SourceHandle
-
-    Notes
-    -----
-    - If `source` is a DOI/record URL, this will *download the zip once* into cache.
-    - For a *local directory*, we treat it as the `year_root` (the directory that contains manifest/catalog).
+    SourceHandle or List[SourceHandle] (when allow_multi=True and multiple years)
     """
     src = str(source).strip()
 
@@ -183,9 +182,7 @@ def resolve_source(
     # 2) Local zip?
     if p.exists() and p.is_file() and p.suffix.lower() == ".zip":
         _check_archive_md5(p, expected_archive_md5)
-        # For zips we don't have a real year_root yet; we store a placeholder
-        # and record where the year_root lives *inside* the archive when we load the index.
-        handle = SourceHandle(
+        return SourceHandle(
             kind="zip",
             year_root=Path("<zip>"),
             archive_path=p,
@@ -194,33 +191,95 @@ def resolve_source(
             expected_manifest_md5=expected_manifest_md5,
             expected_catalog_md5=expected_catalog_md5,
         )
-        return handle
 
-    # 3) Zenodo DOI/URL -> download zip
+    # 3) Zenodo DOI/URL?
     if _looks_like_zenodo(src):
         if requests is None:
             raise HRSSIOError("requests is required to open DOI/URL sources. Install with `pip install requests`.")
-        archive_path = _download_zenodo_zip_to_cache(
-            src,
-            cache_dir=_default_cache_dir(cache_dir, archive_key="zenodo"),
-            zenodo_host=zenodo_host,
-            sandbox_host=sandbox_host,
-            token=token,
-        )
-        _check_archive_md5(archive_path, expected_archive_md5)
-        return SourceHandle(
-            kind="zip",
-            year_root=Path("<zip>"),
-            archive_path=archive_path,
-            cache_dir=_default_cache_dir(cache_dir, archive_key=_archive_key_for_zip(archive_path)),
-            expected_archive_md5=expected_archive_md5,
-            expected_manifest_md5=expected_manifest_md5,
-            expected_catalog_md5=expected_catalog_md5,
-        )
 
+        # Determine target year(s), if any
+        target_years: List[int] = []
+        if years:
+            target_years = sorted({int(y) for y in years})
+        elif date_from and date_to:
+            target_years = _years_in_range(date_from, date_to)
+
+        # No selection -> legacy behavior: pick the largest zip
+        if not target_years:
+            archive_path = _download_zenodo_zip_to_cache(
+                src,
+                cache_dir=_default_cache_dir(cache_dir, archive_key="zenodo"),
+                zenodo_host=zenodo_host,
+                sandbox_host=sandbox_host,
+                token=token,
+                prefer_years=None,
+            )
+            _check_archive_md5(archive_path, expected_archive_md5)
+            return SourceHandle(
+                kind="zip",
+                year_root=Path("<zip>"),
+                archive_path=archive_path,
+                cache_dir=_default_cache_dir(cache_dir, archive_key=_archive_key_for_zip(archive_path)),
+                expected_archive_md5=expected_archive_md5,
+                expected_manifest_md5=expected_manifest_md5,
+                expected_catalog_md5=expected_catalog_md5,
+            )
+
+        # Single year → single handle
+        if len(target_years) == 1:
+            y = target_years[0]
+            archive_path = _download_zenodo_zip_to_cache(
+                src,
+                cache_dir=_default_cache_dir(cache_dir, archive_key="zenodo"),
+                zenodo_host=zenodo_host,
+                sandbox_host=sandbox_host,
+                token=token,
+                prefer_years=[y],
+            )
+            _check_archive_md5(archive_path, expected_archive_md5)
+            return SourceHandle(
+                kind="zip",
+                year_root=Path("<zip>"),
+                archive_path=archive_path,
+                cache_dir=_default_cache_dir(cache_dir, archive_key=_archive_key_for_zip(archive_path)),
+                expected_archive_md5=expected_archive_md5,
+                expected_manifest_md5=expected_manifest_md5,
+                expected_catalog_md5=expected_catalog_md5,
+            )
+
+        # Multiple years → either list of handles or error
+        if not allow_multi:
+            raise HRSSIOError(
+                f"Date selection spans multiple years {target_years} — pass allow_multi=True "
+                f"or call resolve_sources_for_date_range(...)."
+            )
+
+        handles: List[SourceHandle] = []
+        for y in target_years:
+            archive_path = _download_zenodo_zip_to_cache(
+                src,
+                cache_dir=_default_cache_dir(cache_dir, archive_key="zenodo"),
+                zenodo_host=zenodo_host,
+                sandbox_host=sandbox_host,
+                token=token,
+                prefer_years=[y],
+            )
+            _check_archive_md5(archive_path, expected_archive_md5)
+            h = SourceHandle(
+                kind="zip",
+                year_root=Path("<zip>"),
+                archive_path=archive_path,
+                cache_dir=_default_cache_dir(cache_dir, archive_key=_archive_key_for_zip(archive_path)),
+                expected_archive_md5=expected_archive_md5,
+                expected_manifest_md5=expected_manifest_md5,
+                expected_catalog_md5=expected_catalog_md5,
+            )
+            handles.append(h)
+        return handles
+
+    # 4) Unknown
     raise HRSSIOError(
-        f"Unsupported source: {source!r}. "
-        "Provide a local year directory, a .zip file, or a Zenodo DOI/record URL."
+        f"Unsupported source: {source!r}. Provide a local year directory, a .zip file, or a Zenodo DOI/record URL."
     )
 
 
@@ -400,6 +459,25 @@ def peek_h5_attrs(local_h5_path: Union[str, os.PathLike]) -> Dict[str, object]:
 
 # ----------------------------- Helpers -----------------------------
 
+def _inject_download_and_token(url: str, token: Optional[str]) -> str:
+    """Ensure ?download=1 is present; include access_token if provided."""
+    u = urlparse(url)
+    q = parse_qs(u.query)
+    q["download"] = ["1"]
+    if token:
+        # Safer for cross-domain redirects than relying on Authorization header alone.
+        q["access_token"] = [token]
+    # flatten single values
+    flat = []
+    for k, vs in q.items():
+        for v in vs:
+            flat.append((k, v))
+    return urlunparse(u._replace(query=urlencode(flat)))
+
+def _looks_like_zip_magic(b: bytes) -> bool:
+    # ZIP signatures: 0x04034b50 (PK\x03\x04), also accept empty-zip markers
+    return b.startswith(b"PK\x03\x04") or b.startswith(b"PK\x05\x06") or b.startswith(b"PK\x07\x08")
+
 def _pretty_attr(val):
     # mirror your writer's humanization to keep things readable
     import numpy as _np
@@ -437,6 +515,23 @@ def _archive_key_for_zip(zip_path: Path) -> str:
         return f"zip-{zip_path.name}"
 
 
+def _parse_dateish(s: str) -> date:
+    s = s.strip()
+    if re.fullmatch(r"\d{4}", s):  # "YYYY"
+        return date(int(s), 1, 1)
+    try:
+        # accepts ISO "YYYY-MM-DD"
+        return datetime.fromisoformat(s).date()
+    except Exception:
+        raise HRSSIOError(f"Invalid date format: {s!r}; use 'YYYY' or 'YYYY-MM-DD'")
+
+def _years_in_range(date_from: str, date_to: str) -> List[int]:
+    d0 = _parse_dateish(date_from)
+    d1 = _parse_dateish(date_to)
+    if d1 < d0:
+        d0, d1 = d1, d0
+    return list(range(d0.year, d1.year + 1))
+
 def _ensure_year_root_dir(p: Path) -> Path:
     """
     Normalize a given directory to the actual 'year root' (the dir that contains manifest.csv/catalog.csv).
@@ -471,71 +566,107 @@ def _download_zenodo_zip_to_cache(
     zenodo_host: str,
     sandbox_host: str,
     token: Optional[str],
+    prefer_years: Optional[Iterable[int]] = None,
 ) -> Path:
-    """
-    Resolve a Zenodo DOI/URL to a record, pick the largest .zip file,
-    and download it into <cache_dir>/archives/<record_id>/<filename>.zip.
-
-    Notes
-    -----
-    - We purposely keep this simple and robust:
-      * DOI of the form 10.5281/zenodo.<id> or 10.5072/zenodo.<id> (sandbox)
-      * Record URL of the form https://<host>/records/<id>
-    - Requires `requests`. Raises HRSSIOError on errors.
-    """
     if requests is None:
         raise HRSSIOError("requests is required to download from Zenodo. Install with `pip install requests`.")
 
     rec_id, host = _zenodo_record_id_and_host(doi_or_url, zenodo_host, sandbox_host)
     api_url = f"https://{host}/api/records/{rec_id}"
 
+    # 1) Fetch record JSON (token header is fine for API calls)
     headers = {}
-    params = {}
     if token:
-        # Zenodo accepts token via query or header; we use header.
         headers["Authorization"] = f"Bearer {token}"
 
     try:
-        r = requests.get(api_url, headers=headers, params=params, timeout=30)
+        log.debug("Querying Zenodo record JSON: %s", api_url)
+        r = requests.get(api_url, headers=headers, timeout=30)
         r.raise_for_status()
         meta = r.json()
     except Exception as e:
         raise HRSSIOError(f"Failed to query Zenodo API for record {rec_id} at {host}") from e
 
-    files = meta.get("files") or meta.get("hits", {}).get("hits", [{}])[0].get("files")  # be tolerant
+    # 2) Choose ZIP (optionally by year)
+    files = meta.get("files") or meta.get("hits", {}).get("hits", [{}])[0].get("files")
     if not files:
         raise HRSSIOError(f"No files listed for Zenodo record {rec_id} at {host}")
 
-    # pick the largest .zip
-    zips = [f for f in files if str(f.get('key', '')).lower().endswith(".zip")]
+    def _fname(f): return str(f.get("key") or f.get("filename") or "").lower()
+
+    zips = [f for f in files if _fname(f).endswith(".zip")]
     if not zips:
-        # fallback: pick the largest file
-        zips = files
-    zips.sort(key=lambda f: int(f.get("size", 0)), reverse=True)
-    best = zips[0]
+        raise HRSSIOError(f"Zenodo record {rec_id} at {host} has no .zip assets")
+
+    selected = zips
+    if prefer_years:
+        targets = {str(int(y)) for y in prefer_years}
+        selected = [f for f in zips if any(y in _fname(f) for y in targets)]
+        if not selected:
+            yrs = ", ".join(sorted(targets))
+            raise HRSSIOError(
+                f"No .zip on record {rec_id} matches requested year(s): {yrs}. "
+                f"Available: {[f.get('key') or f.get('filename') for f in zips]}"
+            )
+
+    selected.sort(key=lambda f: int(f.get("size", 0)), reverse=True)
+    best = selected[0]
     filename = best.get("key") or best.get("filename") or f"{rec_id}.zip"
 
-    # Build a direct download URL
+    # 3) Prefer an API "content" link; fallback to the canonical API content path.
     link = None
-    # new records: get 'links': {'self': ... , 'download': ...}
-    if "links" in best and "download" in best["links"]:
-        link = best["links"]["download"]
-    elif "links" in meta and "latest" in meta["links"]:
-        # fallback to record download link pattern
-        link = f"https://{host}/records/{rec_id}/files/{filename}?download=1"
+    blinks = (best.get("links") or {})
+    if blinks.get("content"):
+        link = blinks["content"]
     else:
-        link = f"https://{host}/records/{rec_id}/files/{filename}?download=1"
+        # Construct API content endpoint (NOT the UI "/records/.../files/..." page)
+        link = f"https://{host}/api/records/{rec_id}/files/{filename}/content"
 
+    # 4) Prepare cache path
     dst_dir = cache_dir / "archives" / str(rec_id)
     dst_dir.mkdir(parents=True, exist_ok=True)
     dst = dst_dir / filename
 
-    if dst.exists() and dst.stat().st_size == int(best.get("size", dst.stat().st_size or 0)):
+    want_size = int(best.get("size", 0))
+    if dst.exists() and (want_size == 0 or dst.stat().st_size == want_size):
         log.debug("Zenodo zip already cached: %s", dst)
         return dst.resolve()
 
+    # 5) Download from API content endpoint.
+    #    Keep Authorization header; add download=1 param (harmless on API).
+    download_headers = {}
+    if token:
+        download_headers["Authorization"] = f"Bearer {token}"
+    params = {"download": 1}
+
+    log.debug("Downloading via API content link: %s params=%s -> %s",
+              link,
+              {"download": params["download"]},
+              dst)
+
     try:
-        with requests.get(link, headers=headers, stream=True, timeout=30) as resp:
+        with requests.get(
+            link,
+            headers=download_headers,
+            params=params,
+            stream=True,
+            timeout=60,
+            allow_redirects=True,
+        ) as resp:
+            ctype = resp.headers.get("Content-Type", "")
+            # If we somehow still got an HTML page, include final URL to help debug.
+            if resp.status_code == 200 and "text/html" in ctype.lower():
+                try:
+                    head = resp.raw.read(256, decode_content=True)
+                except Exception:
+                    head = b""
+                raise HRSSIOError(
+                    "Zenodo returned HTML instead of a file. This usually means the "
+                    "request hit a login/embargo page. Ensure you are using the API "
+                    "content link and that your token has access to restricted files. "
+                    f"final_url={resp.url!r} Content-Type={ctype} preview={head[:120]!r}"
+                )
+
             resp.raise_for_status()
             tmp = dst.with_suffix(".partial")
             with open(tmp, "wb") as f:
@@ -544,7 +675,7 @@ def _download_zenodo_zip_to_cache(
                         f.write(chunk)
             os.replace(tmp, dst)
     except Exception as e:
-        raise HRSSIOError(f"Failed to download Zenodo asset: {link}") from e
+        raise HRSSIOError(f"Failed to download Zenodo asset from API content link: {link}") from e
 
     return dst.resolve()
 
