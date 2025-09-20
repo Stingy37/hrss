@@ -135,14 +135,13 @@ def resolve_source(
     zenodo_host: str = "zenodo.org",
     sandbox_host: str = "sandbox.zenodo.org",
     token: Optional[str] = None,
-    # NEW optional selectors:
+    # Optional selectors (Zenodo only)
     years: Optional[Iterable[int]] = None,
     date_from: Optional[str] = None,
     date_to: Optional[str] = None,
-    allow_multi: bool = False,
-) -> Union["SourceHandle", List["SourceHandle"]]:
+) -> List["SourceHandle"]:
     """
-    Normalize a user-provided source into SourceHandle(s).
+    Normalize a user-provided source into *a list* of SourceHandles.
 
     Inputs
     ------
@@ -153,14 +152,12 @@ def resolve_source(
 
     Optional selection (Zenodo only)
     --------------------------------
-    years: one or more explicit years to select year-zips by filename.
+    years: explicit years to select year-zips by filename.
     date_from/date_to: infer years covered by the range (inclusive).
-    allow_multi: if True and multiple years match, return a list of handles (one per year).
-                 If False (default) and multiple years match, raise HRSSIOError.
 
     Returns
     -------
-    SourceHandle or List[SourceHandle] (when allow_multi=True and multiple years)
+    List[SourceHandle] (always). Single inputs return a 1-element list.
     """
     src = str(source).strip()
 
@@ -169,7 +166,7 @@ def resolve_source(
     if p.exists() and p.is_dir():
         year_root = _ensure_year_root_dir(p)
         _check_top_level_csv_md5s(year_root, expected_manifest_md5, expected_catalog_md5)
-        return SourceHandle(
+        return [SourceHandle(
             kind="dir",
             year_root=year_root,
             archive_path=None,
@@ -177,12 +174,12 @@ def resolve_source(
             expected_archive_md5=None,
             expected_manifest_md5=expected_manifest_md5,
             expected_catalog_md5=expected_catalog_md5,
-        )
+        )]
 
     # 2) Local zip?
     if p.exists() and p.is_file() and p.suffix.lower() == ".zip":
         _check_archive_md5(p, expected_archive_md5)
-        return SourceHandle(
+        return [SourceHandle(
             kind="zip",
             year_root=Path("<zip>"),
             archive_path=p,
@@ -190,7 +187,7 @@ def resolve_source(
             expected_archive_md5=expected_archive_md5,
             expected_manifest_md5=expected_manifest_md5,
             expected_catalog_md5=expected_catalog_md5,
-        )
+        )]
 
     # 3) Zenodo DOI/URL?
     if _looks_like_zenodo(src):
@@ -215,7 +212,7 @@ def resolve_source(
                 prefer_years=None,
             )
             _check_archive_md5(archive_path, expected_archive_md5)
-            return SourceHandle(
+            return [SourceHandle(
                 kind="zip",
                 year_root=Path("<zip>"),
                 archive_path=archive_path,
@@ -223,37 +220,9 @@ def resolve_source(
                 expected_archive_md5=expected_archive_md5,
                 expected_manifest_md5=expected_manifest_md5,
                 expected_catalog_md5=expected_catalog_md5,
-            )
+            )]
 
-        # Single year → single handle
-        if len(target_years) == 1:
-            y = target_years[0]
-            archive_path = _download_zenodo_zip_to_cache(
-                src,
-                cache_dir=_default_cache_dir(cache_dir, archive_key="zenodo"),
-                zenodo_host=zenodo_host,
-                sandbox_host=sandbox_host,
-                token=token,
-                prefer_years=[y],
-            )
-            _check_archive_md5(archive_path, expected_archive_md5)
-            return SourceHandle(
-                kind="zip",
-                year_root=Path("<zip>"),
-                archive_path=archive_path,
-                cache_dir=_default_cache_dir(cache_dir, archive_key=_archive_key_for_zip(archive_path)),
-                expected_archive_md5=expected_archive_md5,
-                expected_manifest_md5=expected_manifest_md5,
-                expected_catalog_md5=expected_catalog_md5,
-            )
-
-        # Multiple years → either list of handles or error
-        if not allow_multi:
-            raise HRSSIOError(
-                f"Date selection spans multiple years {target_years} — pass allow_multi=True "
-                f"or call resolve_sources_for_date_range(...)."
-            )
-
+        # Year selection -> one handle per year
         handles: List[SourceHandle] = []
         for y in target_years:
             archive_path = _download_zenodo_zip_to_cache(
@@ -265,7 +234,7 @@ def resolve_source(
                 prefer_years=[y],
             )
             _check_archive_md5(archive_path, expected_archive_md5)
-            h = SourceHandle(
+            handles.append(SourceHandle(
                 kind="zip",
                 year_root=Path("<zip>"),
                 archive_path=archive_path,
@@ -273,8 +242,7 @@ def resolve_source(
                 expected_archive_md5=expected_archive_md5,
                 expected_manifest_md5=expected_manifest_md5,
                 expected_catalog_md5=expected_catalog_md5,
-            )
-            handles.append(h)
+            ))
         return handles
 
     # 4) Unknown
@@ -459,24 +427,13 @@ def peek_h5_attrs(local_h5_path: Union[str, os.PathLike]) -> Dict[str, object]:
 
 # ----------------------------- Helpers -----------------------------
 
-def _inject_download_and_token(url: str, token: Optional[str]) -> str:
-    """Ensure ?download=1 is present; include access_token if provided."""
-    u = urlparse(url)
-    q = parse_qs(u.query)
-    q["download"] = ["1"]
-    if token:
-        # Safer for cross-domain redirects than relying on Authorization header alone.
-        q["access_token"] = [token]
-    # flatten single values
-    flat = []
-    for k, vs in q.items():
-        for v in vs:
-            flat.append((k, v))
-    return urlunparse(u._replace(query=urlencode(flat)))
-
-def _looks_like_zip_magic(b: bytes) -> bool:
-    # ZIP signatures: 0x04034b50 (PK\x03\x04), also accept empty-zip markers
-    return b.startswith(b"PK\x03\x04") or b.startswith(b"PK\x05\x06") or b.startswith(b"PK\x07\x08")
+def _human_bytes(n: int) -> str:
+    # simple IEC-ish formatter for logs
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if n < 1024 or unit == "TB":
+            return f"{n:.1f} {unit}" if unit != "B" else f"{n} {unit}"
+        n /= 1024.0
+    return f"{n:.1f} TB"
 
 def _pretty_attr(val):
     # mirror your writer's humanization to keep things readable
@@ -644,36 +601,66 @@ def _download_zenodo_zip_to_cache(
               {"download": params["download"]},
               dst)
 
+    is_api_content = link.startswith(f"https://{host}/api/") or link.split("?", 1)[0].endswith("/content")
+
+    if is_api_content:
+        # `headers` was set earlier: {} or {'Authorization': f'Bearer {token}'} when token is provided
+        req_headers = headers
+    else:
+        req_headers = {}
+        if token:
+            params["access_token"] = token
+
     try:
-        with requests.get(
-            link,
-            headers=download_headers,
-            params=params,
-            stream=True,
-            timeout=60,
-            allow_redirects=True,
-        ) as resp:
+        with requests.get(link, headers=req_headers, params=params, stream=True, timeout=30, allow_redirects=True) as resp:
             ctype = resp.headers.get("Content-Type", "")
-            # If we somehow still got an HTML page, include final URL to help debug.
             if resp.status_code == 200 and "text/html" in ctype.lower():
                 try:
                     head = resp.raw.read(256, decode_content=True)
                 except Exception:
                     head = b""
                 raise HRSSIOError(
-                    "Zenodo returned HTML instead of a file. This usually means the "
-                    "request hit a login/embargo page. Ensure you are using the API "
-                    "content link and that your token has access to restricted files. "
-                    f"final_url={resp.url!r} Content-Type={ctype} preview={head[:120]!r}"
+                    f"Zenodo returned non-ZIP content for embargoed download. "
+                    f"status={resp.status_code} Content-Type={ctype} preview={head[:120]!r}"
                 )
 
             resp.raise_for_status()
+
             tmp = dst.with_suffix(".partial")
+
+            # Use server-provided size if available; fall back to file's known size from metadata.
+            total_header = resp.headers.get("Content-Length")
+            total_size = int(total_header) if total_header and total_header.isdigit() else int(want_size or 0)
+
+            downloaded = 0
+            next_pct = 5  # 5% steps
+            last_mb_bucket = -1  # for unknown totals, log every ~250MB
+
+            log.debug("Starting download: %s (expected %s)", filename, _human_bytes(total_size) if total_size else "unknown")
+
             with open(tmp, "wb") as f:
-                for chunk in resp.iter_content(chunk_size=1 << 20):
-                    if chunk:
-                        f.write(chunk)
+                for chunk in resp.iter_content(chunk_size=1 << 20):  # 1MB chunks
+                    if not chunk:
+                        continue
+                    f.write(chunk)
+                    downloaded += len(chunk)
+
+                    if total_size > 0:
+                        pct = int(downloaded * 100 / total_size)
+                        if pct >= next_pct:
+                            log.debug("Downloading %s: %d%% (%s / %s)",
+                                    filename, pct, _human_bytes(downloaded), _human_bytes(total_size))
+                            next_pct += 5
+                    else:
+                        # Unknown total size: log every 250MB
+                        mb_bucket = downloaded // (250 << 20)
+                        if mb_bucket > last_mb_bucket:
+                            last_mb_bucket = mb_bucket
+                            log.debug("Downloading %s: %s so far...", filename, _human_bytes(downloaded))
+
             os.replace(tmp, dst)
+            final_size = dst.stat().st_size
+            log.debug("Download complete: %s (%s)", dst, _human_bytes(final_size))
     except Exception as e:
         raise HRSSIOError(f"Failed to download Zenodo asset from API content link: {link}") from e
 
