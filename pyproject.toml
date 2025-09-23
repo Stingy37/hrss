@@ -19,6 +19,7 @@ dependencies = [
   "h5py>=3.8",
   "matplotlib>=3.7",
   "requests>=2.31; python_version >= '3.9'",
+  "tables>=3.9",
 ]
 
 [project.optional-dependencies]
@@ -34,7 +35,6 @@ dev = [
 Repository = "https://github.com/Stingy37/hrss"
 
 [tool.hatch.build.targets.wheel]
-# Flat layout (no 'src' dir)
 packages = ["hrss"]
 
 [tool.pytest.ini_options]
