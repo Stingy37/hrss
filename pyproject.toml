@@ -42,7 +42,13 @@ Repository = "https://github.com/Stingy37/hrss"
 
 # tells hatchling which directories to build for wheel 
 [tool.hatch.build.targets.wheel]
-packages = ["hrss"]
+packages = ["hrss"] # only include modules inside hrss sub-directory (behavior we expect)
+
+# keep source-distribution focused (but we still need pyproject.toml, etc. so builder can build locally)
+[tool.hatch.build.targets.sdist]
+# Keep source bundle focused but useful
+include = ["hrss", "pyproject.toml", "README.*", "LICENSE*"]
+exclude = ["**/__pycache__", ".venv", ".git", "dist", "build"]
 
 # automatically set verbose debugging 
 [tool.pytest.ini_options]
