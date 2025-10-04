@@ -13,6 +13,9 @@ __pycache__/
 .venv/
 env/
 venv/
+# IMPORTANT -> ignore the temp venv for testing too
+.venv-artifact/
+
 
 # OS/editor
 .DS_Store
@@ -31,3 +34,20 @@ Datasets/
 
 # test configs 
 tests/test_configs.json
+
+# Distribution / packaging
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+*.egg-info/
+.installed.cfg
+*.egg

@@ -27,8 +27,8 @@ if _TC:
     from .loader import HRSSDataset, HRSSIOError, HRSSIntegrityError, load  
 
 # ---- lazy re-exports to keep import fast ----
-# delay importing specific modules so that just "import hrss" is fast
-#     - once someone accesses hrss.load, then we import hrss.loader
+# delay importing specific attributes
+#     - ex. once someone accesses hrss.load, then we import hrss.loader
 def __getattr__(name: str):
     if name in _PUBLIC:
         from . import loader  # import on first access only
