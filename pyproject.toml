@@ -3,7 +3,6 @@
 requires = ["hatchling>=1.18"]
 build-backend = "hatchling.build"
 
-
 [project]
 name = "hrss"
 version = "1.0.0"
@@ -16,8 +15,9 @@ classifiers = [
   "Operating System :: OS Independent",
 ]
 
-# for the user -> pip looks at this upon installation, and automatically installs dependencies 
-# if user doesn't have them already
+
+# ------------- dependencies
+# for the user -> pip looks at this upon installation, and automatically installs dependencies if user doesn't have them already
 dependencies = [
   "numpy>=1.22",
   "pandas>=2.0",
@@ -26,10 +26,13 @@ dependencies = [
   "tables>=3.9",
 ]
 
-# optional dependencies 
+
+# ------------- optional dependencies 
 [project.optional-dependencies]
+
 # installs needed for the notebooks
 notebooks = ["jupyter", "ipykernel"]
+
 dev = [
   "pytest>=7.0",
   "pytest-cov>=4.0",
@@ -38,9 +41,12 @@ dev = [
 ]
 viz = ["matplotlib>=3.7"] # only if the user wants to visualize data (visualize.py)
 
+
 [project.urls]
 Repository = "https://github.com/Stingy37/hrss"
 
+
+# ------------- distribution
 # tells hatchling which directories to build for wheel 
 [tool.hatch.build.targets.wheel]
 packages = ["hrss"] # only include modules inside hrss sub-directory (behavior we expect)
@@ -51,6 +57,8 @@ packages = ["hrss"] # only include modules inside hrss sub-directory (behavior w
 include = ["hrss", "pyproject.toml", "README.*", "LICENSE*"]
 exclude = ["**/__pycache__", ".venv", ".git", "dist", "build"]
 
+
+# ------------- pytest dev settings
 # automatically set verbose debugging 
 [tool.pytest.ini_options]
 log_cli = true

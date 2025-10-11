@@ -9,11 +9,12 @@ __pycache__/
 .pytest_cache/
 .ipynb_checkpoints/
 
-# environments
+# ----- environments -----
+# dev venv
 .venv/
 env/
 venv/
-# IMPORTANT -> ignore the temp venv for testing too
+# ignore the temp venv for testing too
 .venv-artifact/
 
 
@@ -31,6 +32,9 @@ Datasets/
 
 # notebooks metadata noise
 **/.ipynb_checkpoints
+
+# Jupyter scratch (for developing notebooks, so ignore)
+notebooks/99_*.ipynb
 
 # test configs 
 tests/test_configs.json
