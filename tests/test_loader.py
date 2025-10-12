@@ -235,3 +235,46 @@ def test_loader_zenodo_minimal_e2e(patched_cache_env):
     for i in range(n):
         X, Y, meta = ds[i]
         assert X.shape[0] == 2 and Y.shape[0] == 1
+
+# -----------------------------
+# Canonicalization invariants
+# -----------------------------
+def _first_is_global_min(az_row: np.ndarray) -> bool:
+    """Return True if the first azimuth equals the global min (mod 360)."""
+    if az_row.size == 0 or not np.isfinite(az_row).any():
+        return True  # nothing to check
+    azm = np.mod(np.asarray(az_row, dtype=np.float32), 360.0)
+    return int(np.nanargmin(azm)) == 0
+
+@pytest.mark.skipif(not ENV_YEAR_DIR, reason="HRSS_TEST_YEAR_DIR not set")
+def test_loader_dir_canonicalizes_azimuth_min_first(patched_cache_env):
+    # prefer reflectivity; fallback to any product the helper finds
+    prod = "reflectivity"
+    try:
+        prod = _pick_first_available_product_kind(ENV_YEAR_DIR)
+    except Exception:
+        pass
+
+    # include_geometry must be True so we can inspect azimuth_deg
+    ds = hloader.load(
+        ENV_YEAR_DIR,
+        input_product=prod,
+        target="future",
+        t_in=3, t_out=2, stride=2, cadence_min=5, cadence_tol_sec=120,
+        include_geometry=True,
+    )
+    assert len(ds) > 0
+
+    # check a couple samples to exercise cache + different starts
+    for idx in [0, min(1, len(ds)-1)]:
+        X, Y, meta = ds[idx]
+        geom = meta.get("geometry", {})
+        az = geom.get("azimuth_deg", None)
+        if az is None:
+            pytest.skip("dataset lacks azimuth_deg in geometry; cannot verify canonicalization")
+        az = np.asarray(az)
+        assert az.ndim == 2 and az.shape[0] == X.shape[0], "geometry T must match input window T"
+
+        # every frame in this window should be canonical (first ray = smallest azimuth)
+        ok = all(_first_is_global_min(az[t]) for t in range(az.shape[0]))
+        assert ok, "azimuth_deg not canonicalized: first ray is not global min for at least one frame"

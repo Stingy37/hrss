@@ -130,6 +130,154 @@ def _compute_km_per_pixel(min_lat, max_lat, min_lon, max_lon, H: int, W: int) ->
     return (float(ky), float(kx))
 
 
+# ----------------------------- canonicalization (on-access) -----------------------------
+
+from collections import OrderedDict
+from time import perf_counter
+
+_CANON_ATTR_RULE = "min_az_first"     # if h5.attrs["ray_order_rule"] == this, we skip
+_ROLL_CACHE: "OrderedDict[str, dict]" = OrderedDict()
+_ROLL_CACHE_MAX = 64  # number of files with cached rolls
+
+def _ray_canonical_roll_1d(az1d: np.ndarray) -> int:
+    """Return roll so the first ray is the one with the smallest az (0..360)."""
+    if az1d.size == 0 or not np.isfinite(az1d).any():
+        return 0
+    az = np.mod(az1d.astype(np.float32, copy=False), 360.0)
+    return int(np.nanargmin(az))
+
+def _roll_axis_apply_inplace(win: np.ndarray, rolls: np.ndarray, axis_4d: int) -> None:
+    """
+    Roll [T,H,W,C] along the ray/gate axis with per-frame rolls.
+    axis_4d: 1 for H (rays), 2 for W (range) in the 4D layout.
+    """
+    if rolls.size == 0 or not np.any(rolls):
+        return
+    if axis_4d not in (1, 2):
+        return
+    axis3 = axis_4d - 1  # map 4D axis to 3D slice (H,W,C)
+
+    for t, r in enumerate(rolls):
+        if r:
+            win[t] = np.roll(win[t], -int(r), axis=axis3)
+
+
+def _lru_set_rolls(key: str, val: dict) -> None:
+    _ROLL_CACHE[key] = val
+    _ROLL_CACHE.move_to_end(key)
+    if len(_ROLL_CACHE) > _ROLL_CACHE_MAX:
+        _ROLL_CACHE.popitem(last=False)
+
+def _get_or_build_file_rolls(local_path: Path) -> Dict[str, object]:
+    """
+    Returns a dict:
+      {
+        "rolls": np.ndarray (int16, shape [T]),
+        "axis": int (1 for H/rays, 2 for W/range),
+        "T": int, "H": int, "W": int
+      }
+    Caches per file so any window can slice into it cheaply.
+    """
+    key = str(local_path)
+    hit = _ROLL_CACHE.get(key)
+    if hit is not None:
+        _ROLL_CACHE.move_to_end(key)
+        return hit
+
+    t0 = perf_counter()
+    with h5py.File(local_path, "r") as h5:
+        if "data" not in h5:
+            info = {"rolls": np.zeros((0,), dtype=np.int16), "axis": 1, "T": 0, "H": 0, "W": 0}
+            _lru_set_rolls(key, info); return info
+
+        T, H, W, _C = map(int, h5["data"].shape)
+
+        # If already marked canonical, provide zero-rolls and return quickly
+        try:
+            rule = h5.attrs.get("ray_order_rule", None)
+            if isinstance(rule, (bytes, bytearray)):
+                rule = rule.decode("utf-8", errors="ignore")
+        except Exception:
+            rule = None
+
+        # Prefer azimuth presence; otherwise we can't roll
+        if "azimuth_deg" not in h5 or T == 0:
+            info = {"rolls": np.zeros((T,), dtype=np.int16), "axis": 1, "T": T, "H": H, "W": W}
+            _lru_set_rolls(key, info); return info
+
+        az = np.asarray(h5["azimuth_deg"][...])  # shape [T, N]; N should match H or W
+        if az.ndim != 2 or az.shape[0] != T:
+            info = {"rolls": np.zeros((T,), dtype=np.int16), "axis": 1, "T": T, "H": H, "W": W}
+            _lru_set_rolls(key, info); return info
+
+        # Decide which axis corresponds to azimuth rays
+        if az.shape[1] == H:
+            axis = 1  # roll along H
+        elif az.shape[1] == W:
+            axis = 2  # rare, but support
+        else:
+            # Unknown shape → give up (no-op)
+            info = {"rolls": np.zeros((T,), dtype=np.int16), "axis": 1, "T": T, "H": H, "W": W}
+            _lru_set_rolls(key, info); return info
+
+        if rule == _CANON_ATTR_RULE:
+            rolls = np.zeros((T,), dtype=np.int16)
+        else:
+            # Compute per-frame rolls
+            rolls = np.empty((T,), dtype=np.int16)
+            for t in range(T):
+                rolls[t] = _ray_canonical_roll_1d(az[t, :])
+
+    t1 = perf_counter()
+    info = {"rolls": rolls, "axis": axis, "T": T, "H": H, "W": W}
+    _lru_set_rolls(key, info)
+    log.debug("[canon] built rolls for %s: T=%d axis=%d nonzero=%d (%.1f ms)",
+              local_path, int(info["T"]), int(info["axis"]),
+              int(np.count_nonzero(rolls)), (t1 - t0) * 1000.0)
+    return info
+
+def _apply_canonicalization_to_window(local_path: Path, start: int, length: int,
+                                      window: np.ndarray, *, debug: bool = False) -> None:
+    """
+    Canonicalize a [length, H, W, C] window in-place (ray-min-az-first), if possible.
+    No-op when azimuth is absent or already canonical.
+    """
+    info = _get_or_build_file_rolls(local_path)
+    if length <= 0 or info["rolls"].size == 0:
+        return
+    s = int(start); e = int(start + length)
+    # Guard against truncated T for odd files
+    e = min(e, int(info["rolls"].size))
+    rolls = np.asarray(info["rolls"][s:e], dtype=np.int32)
+    if rolls.size != window.shape[0]:
+        # Mismatch → bail gracefully
+        return
+    t0 = perf_counter()
+    _roll_axis_apply_inplace(window, rolls, axis_4d=int(info["axis"]))
+    if debug:
+        if rolls.size:
+            nz = int(np.count_nonzero(rolls))
+            log.debug("[canon] window %s [%d:%d]: axis=%d rolled=%d/%d (min/med/max=%d/%d/%d) (%.1f ms)",
+                      local_path, s, e, int(info["axis"]), nz, rolls.size,
+                      int(rolls.min(initial=0)), int(np.median(rolls)), int(rolls.max(initial=0)),
+                      (perf_counter() - t0) * 1000.0)
+
+def _geometry_for_window(local_path: Path, start: int, length: int, *, canonicalize: bool) -> Dict[str, np.ndarray]:
+    g = _read_geom_window(local_path, start, length)
+    if not canonicalize or length <= 0:
+        return g
+    info = _get_or_build_file_rolls(local_path)
+    rolls = np.asarray(info["rolls"][start:start+length], dtype=np.int32)
+    # roll per-frame 1-D ray arrays; range_m stays put
+    for k in ("azimuth_deg", "elevation_deg"):
+        arr = g.get(k, None)
+        if isinstance(arr, np.ndarray) and arr.ndim == 2 and arr.shape[0] == length:
+            for t, r in enumerate(rolls):
+                if r:
+                    arr[t] = np.roll(arr[t], -int(r), 0)
+    return g
+
+
 # ----------------------------- dataset index -----------------------------
 
 @dc.dataclass(slots=True)
@@ -196,7 +344,8 @@ class HRSSDataset:
         transform_Y: Optional[Callable[[np.ndarray, Dict], np.ndarray]] = None,
         joint_transform: Optional[Callable[[np.ndarray, np.ndarray, Dict], Tuple[np.ndarray, np.ndarray]]] = None,
         seed: Optional[int] = 42,
-        include_geometry: bool = True
+        include_geometry: bool = True, 
+        canonicalize_on_access: bool = True
     ) -> None:
         self.input_product = str(input_product)
         self.target_mode = "future" if str(target).lower() == "future" else "product"
@@ -213,6 +362,7 @@ class HRSSDataset:
         self.joint_transform = joint_transform
         self.seed = seed
         self.include_geometry = bool(include_geometry)
+        self.canonicalize_on_access = bool(canonicalize_on_access)
 
 
         src_list: List[Union[str, os.PathLike]] = _as_list(source)
@@ -494,16 +644,20 @@ class HRSSDataset:
 
     def __getitem__(self, idx: int) -> Tuple[np.ndarray, np.ndarray, Dict]:
         s = self._samples[idx]
+
+        # --- read input window ---
         X = self._read_window(s.p_in.local_path, s.start, s.t_in)
 
+        # --- read target window & resolve its local path ---
         if s.target_mode == "future":
-            Y = self._read_window(s.p_in.local_path, s.start + s.t_in, s.t_out)
-            tgt_path = s.p_in.local_path
+            tgt_local = s.p_in.local_path
+            Y = self._read_window(tgt_local, s.start + s.t_in, s.t_out)
         else:
             assert s.p_tgt is not None
-            Y = self._read_window(s.p_tgt.local_path, s.start + s.t_in, s.t_out)
-            tgt_path = s.p_tgt.local_path
+            tgt_local = s.p_tgt.local_path
+            Y = self._read_window(tgt_local, s.start + s.t_in, s.t_out)
 
+        # --- meta (before any transforms) ---
         meta = {
             "site": s.site,
             "storm_id": s.storm_id,
@@ -514,14 +668,35 @@ class HRSSDataset:
             "HWC_in": X.shape[1:],
             "HWC_out": Y.shape[1:],
             "path_in": str(s.p_in.local_path),
-            "path_tgt": str(tgt_path),
-            "start_idx": int(s.start),        # helpful for transforms/caching
+            "path_tgt": str(tgt_local),
+            "start_idx": int(s.start),
         }
 
+        # --- geometry for each window (already rolled if canonicalize_on_access) ---
+        geom_in = None
+        geom_out = None
         if self.include_geometry:
-            # geometry for the input window (and it’s fine for Y too since cadence is uniform)
-            meta["geometry"] = _read_geom_window(s.p_in.local_path, s.start, s.t_in)
+            geom_in  = _geometry_for_window(
+                s.p_in.local_path, s.start, s.t_in,
+                canonicalize=self.canonicalize_on_access
+            )
+            geom_out = _geometry_for_window(
+                tgt_local, s.start + s.t_in, s.t_out,
+                canonicalize=self.canonicalize_on_access
+            )
+            meta["geometry_in"] = geom_in
+            meta["geometry_out"] = geom_out
 
+        # --- canonicalize data arrays (roll rays) in-place ---
+        if self.canonicalize_on_access:
+            _apply_canonicalization_to_window(
+                s.p_in.local_path, s.start, s.t_in, X, debug=True
+            )
+            _apply_canonicalization_to_window(
+                tgt_local, s.start + s.t_in, s.t_out, Y, debug=True
+            )
+
+        # --- NaN handling + optional transforms ---
         if self.fill_nan is not None:
             X = np.nan_to_num(X, nan=self.fill_nan, posinf=self.fill_nan, neginf=self.fill_nan)
             Y = np.nan_to_num(Y, nan=self.fill_nan, posinf=self.fill_nan, neginf=self.fill_nan)
@@ -534,8 +709,10 @@ class HRSSDataset:
             if self.transform_Y is not None:
                 Y = self.transform_Y(Y, meta)
 
-        log.debug("__getitem__(%d): X%s Y%s site=%s storm=%s start=%d", idx, X.shape, Y.shape, s.site, s.storm_id, s.start)
+        log.debug("__getitem__(%d): X%s Y%s site=%s storm=%s start=%d",
+                idx, X.shape, Y.shape, s.site, s.storm_id, s.start)
         return X, Y, meta
+
 
 
 

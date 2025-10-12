@@ -9,7 +9,7 @@ import pandas as pd
 import matplotlib.pyplot as plt
 
 try:
-    import h5py  # only used for context HDF lookup
+    import h5py  # only used for context HDF lookup (in pyproject dependencies)
 except Exception:
     h5py = None  # handled gracefully below
 
