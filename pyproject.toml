@@ -7,7 +7,7 @@ build-backend = "hatchling.build"
 name = "hrss"
 version = "1.0.0"
 description = "High-Res Severe Storm (HRSS) dataset helpers"
-requires-python = ">=3.9"                                      # installation won't succeed if python doens't meet requirements 
+requires-python = ">=3.9"
 authors = [{ name = "Andy Shi" }]
 classifiers = [
   "Programming Language :: Python :: 3",
@@ -15,9 +15,8 @@ classifiers = [
   "Operating System :: OS Independent",
 ]
 
-
 # ------------- dependencies
-# for the user -> pip looks at this upon installation, and automatically installs dependencies if user doesn't have them already
+# keep core install minimal; optional features go under extras
 dependencies = [
   "numpy>=1.22",
   "pandas>=2.0",
@@ -26,40 +25,44 @@ dependencies = [
   "tables>=3.9",
 ]
 
-
 # ------------- optional dependencies 
 [project.optional-dependencies]
 
-# installs needed for the notebooks
-notebooks = ["jupyter", "ipykernel"]
+# Jupyter + plotting for notebooks / quickstart demos
+notebooks = [
+  "jupyter",
+  "ipykernel",
+  "matplotlib>=3.7"
+]
 
+# Dev/test/tooling
 dev = [
   "pytest>=7.0",
   "pytest-cov>=4.0",
   "ruff>=0.5",
   "mypy>=1.8",
 ]
-viz = ["matplotlib>=3.7"] # only if the user wants to visualize data (visualize.py)
 
+# Convenience "all" bundle for users who want everything at once
+all = [
+  "jupyter",
+  "ipykernel",
+  "matplotlib>=3.7",
+  "pyproj>=3.5",
+]
 
 [project.urls]
 Repository = "https://github.com/Stingy37/hrss"
 
-
 # ------------- distribution
-# tells hatchling which directories to build for wheel 
 [tool.hatch.build.targets.wheel]
-packages = ["hrss"] # only include modules inside hrss sub-directory (behavior we expect)
+packages = ["hrss"]
 
-# keep source-distribution focused (but we still need pyproject.toml, etc. so builder can build locally)
 [tool.hatch.build.targets.sdist]
-# Keep source bundle focused but useful
 include = ["hrss", "pyproject.toml", "README.*", "LICENSE*"]
 exclude = ["**/__pycache__", ".venv", ".git", "dist", "build"]
 
-
 # ------------- pytest dev settings
-# automatically set verbose debugging 
 [tool.pytest.ini_options]
 log_cli = true
 log_cli_level = "DEBUG"

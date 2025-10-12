@@ -26,6 +26,31 @@ log.addHandler(logging.NullHandler())
 
 # ----------------------------- small utils -----------------------------
 
+def _read_geom_window(local_path: Path, start: int, length: int) -> Dict[str, np.ndarray]:
+    out: Dict[str, np.ndarray] = {}
+    stop = start + length
+    with h5py.File(local_path, "r") as h5:
+        # Per-time arrays
+        if "azimuth_deg" in h5:
+            out["azimuth_deg"] = np.array(h5["azimuth_deg"][start:stop, :], dtype=np.float32, copy=False)
+        if "range_m" in h5:
+            out["range_m"] = np.array(h5["range_m"][start:stop, :], dtype=np.float32, copy=False)
+        if "elevation_deg" in h5:
+            out["elevation_deg"] = np.array(h5["elevation_deg"][start:stop, :], dtype=np.float32, copy=False)
+        # Root attrs
+        out["site_lat"] = float(h5.attrs.get("site_lat", np.nan))
+        out["site_lon"] = float(h5.attrs.get("site_lon", np.nan))
+        out["site_alt_m"] = float(h5.attrs.get("site_alt_m", np.nan))
+        # Optional bbox time-series (per-frame)
+        def _maybe(name):
+            if name in h5:
+                return np.array(h5[name][...], dtype=np.float32, copy=False)
+            return None
+        out["bbox_min_lat"] = _maybe("bbox_min_lat")
+        out["bbox_max_lat"] = _maybe("bbox_max_lat")
+        out["bbox_min_lon"] = _maybe("bbox_min_lon")
+        out["bbox_max_lon"] = _maybe("bbox_max_lon")
+    return out
 
 def _summ_times_ms(times_ms: np.ndarray) -> str:
     """Compact description of a time vector for debug logging."""
@@ -171,6 +196,7 @@ class HRSSDataset:
         transform_Y: Optional[Callable[[np.ndarray, Dict], np.ndarray]] = None,
         joint_transform: Optional[Callable[[np.ndarray, np.ndarray, Dict], Tuple[np.ndarray, np.ndarray]]] = None,
         seed: Optional[int] = 42,
+        include_geometry: bool = True
     ) -> None:
         self.input_product = str(input_product)
         self.target_mode = "future" if str(target).lower() == "future" else "product"
@@ -186,6 +212,8 @@ class HRSSDataset:
         self.transform_Y = transform_Y
         self.joint_transform = joint_transform
         self.seed = seed
+        self.include_geometry = bool(include_geometry)
+
 
         src_list: List[Union[str, os.PathLike]] = _as_list(source)
         log.debug("HRSSDataset init: sources=%s, years=%s, date_range=[%s..%s], input_product=%s, target=%s, T_in=%d, T_out=%d, stride=%d",
@@ -487,7 +515,12 @@ class HRSSDataset:
             "HWC_out": Y.shape[1:],
             "path_in": str(s.p_in.local_path),
             "path_tgt": str(tgt_path),
+            "start_idx": int(s.start),        # helpful for transforms/caching
         }
+
+        if self.include_geometry:
+            # geometry for the input window (and it’s fine for Y too since cadence is uniform)
+            meta["geometry"] = _read_geom_window(s.p_in.local_path, s.start, s.t_in)
 
         if self.fill_nan is not None:
             X = np.nan_to_num(X, nan=self.fill_nan, posinf=self.fill_nan, neginf=self.fill_nan)
@@ -503,6 +536,7 @@ class HRSSDataset:
 
         log.debug("__getitem__(%d): X%s Y%s site=%s storm=%s start=%d", idx, X.shape, Y.shape, s.site, s.storm_id, s.start)
         return X, Y, meta
+
 
 
     def _read_window(self, local_path: Path, start: int, length: int) -> np.ndarray:
